@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.env/
+.venv/
+env/
+venv/
+ENV/
+Stat_Arb_Strat_env/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VS Code settings
+.vscode/
+
+# MacOS system files
+.DS_Store
+
+# Data files
+*.feather
+*.csv
+data/*.feather
+data/*.csv
+
+# Logs and outputs
+*.log
+
+# Secrets or API keys (if saved locally)
+*.env
+*.key
+*.pem
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
