@@ -22,9 +22,7 @@ Stat_Arb_Strat_env/
 
 # Data files
 *.feather
-*.csv
 data/*.feather
-data/*.csv
 
 # Logs and outputs
 *.log

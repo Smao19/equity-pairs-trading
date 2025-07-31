@@ -4,9 +4,9 @@ data_handler.py
 Responsible for loading, cleaning, and aligning raw OHLCV data for the asset universe.
 - Handles missing values and timestamp alignment.
 - Outputs cleaned DataFrames for downstream modules.
+- Offers data handling methods for facilitating backtest simulation
 """
 
-import dis
 import os
 from datetime import datetime, timedelta
 import pandas as pd
@@ -36,6 +36,78 @@ if not logger.handlers:
 
     # Add handler to logger
     logger.addHandler(file_handler)
+
+
+def get_pairs_list(tickers_csv="final_pairs.csv", data_dir=os.path.abspath(os.path.join('.', 'data'))):
+    # Read tickers down from specified files
+    ticker_df = pd.read_csv(os.path.join(data_dir, tickers_csv))
+    ticker_list = ticker_df.values.tolist()
+    return ticker_list
+
+
+def compute_zscore_series(spread: pd.Series, window: int) -> pd.Series:
+    """
+    Compute the rolling z-score of a spread series.
+    z_t = (spread_t - mean_t) / std_t
+    where mean_t and std_t are the rolling mean and std at time t over the past window periods.
+    """
+    rolling_mean = spread.rolling(window=window).mean()
+    rolling_std = spread.rolling(window=window).std()
+    return (spread - rolling_mean) / rolling_std
+
+
+def compute_rolling_beta(y: pd.Series, x: pd.Series, window: int) -> pd.Series:
+    """
+    Compute rolling beta of y regressed on x using OLS over a moving window.
+    beta_t = Cov(y_t, x_t) / Var(x_t)
+    """
+    cov = y.rolling(window).cov(x)
+    var = x.rolling(window).var()
+    beta = cov / var
+    return beta
+
+
+def prepare_backtest_data(rolling_window: int, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data")):
+    """
+    Prepares cleaned and aligned data for backtest. Computes spread z-score and rolling hedge ratio (beta).
+    """
+    pair_list = get_pairs_list(tickers_csv=tickers_csv, data_dir=data_dir)
+    historical_df = pd.read_parquet(os.path.join(data_dir, historical_parquet))
+
+    pair_data_dict = {}
+
+    for t1, t2 in pair_list:
+        try:
+            df1 = historical_df[t1][['open', 'high', 'low', 'close', 'volume']].copy()
+            df2 = historical_df[t2][['open', 'high', 'low', 'close', 'volume']].copy()
+
+            df1.index = pd.to_datetime(df1.index)
+            df2.index = pd.to_datetime(df2.index)
+
+            df1 = df1.sort_index().dropna()
+            df2 = df2.sort_index().dropna()
+
+            # Align on datetime index
+            df1_aligned, df2_aligned = df1.align(df2, join='inner', axis=0)
+
+            # Add price column
+            df1_aligned['price'] = df1_aligned['close']
+            df2_aligned['price'] = df2_aligned['close']
+
+            # Compute rolling hedge ratio (beta) of df1 on df2
+            beta_series = compute_rolling_beta(df1_aligned['price'], df2_aligned['price'], rolling_window)
+            df1_aligned['hedge_ratio'] = beta_series
+
+            # Compute spread using rolling beta
+            spread = df1_aligned['price'] - beta_series * df2_aligned['price']
+            df1_aligned['zscore'] = compute_zscore_series(spread, window=rolling_window)
+
+            pair_data_dict[(t1, t2)] = (df1_aligned, df2_aligned)
+
+        except KeyError as e:
+            print(f"[Warning] Ticker '{e.args[0]}' not found in columns.")
+
+    return pair_data_dict
 
 
 def clean_data(df):
