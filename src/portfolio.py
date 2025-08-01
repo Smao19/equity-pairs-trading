@@ -16,12 +16,15 @@ class Portfolio:
         self.commission_rate = config.get("commission_bps", 5) / 10_000
         self.total_commission_paid = 0
 
+        # Stored for visualizations
         self.pair_realized_pnl_curves = {}  # {pair: [realized_pnl_t]}
         self.pair_timestamps = {}  # {pair: [timestamp_t]}
 
+        # Stored for performance metrics
         self.holding_periods = []  # List of durations (in minutes) across all pairs
         self.pair_holding_periods = {}  # {pair: [durations]}
         self.current_holding_start = {}  # {pair: timestamp when position was opened}
+        
 
     def update(self, trades, prices, timestamp):
         logger.debug(f"[{timestamp}] Applying trades: {trades}")

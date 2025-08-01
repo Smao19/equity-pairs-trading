@@ -67,7 +67,25 @@ def compute_rolling_beta(y: pd.Series, x: pd.Series, window: int) -> pd.Series:
     return beta
 
 
-def prepare_backtest_data(rolling_window: int, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data")):
+def compute_rolling_spread_vol(df1_px, df2_px, beta_series, window):
+    """
+    Compute rolling volatility of pair spread. 
+    Useful for volatility weighted position sizing in execution.
+    """
+    spread = df1_px - beta_series * df2_px
+    return spread.rolling(window=window).std()
+
+
+def compute_rolling_slope(series, window):
+    """
+    Compute rolling spread slope. Simple diff over window lag.
+    Useful for analyzing spread momentum and determining if mean reversion has started.
+    """
+    # Simple diff over window lag: slope = (series - series.shift(window)) / window
+    return (series - series.shift(window)) / window
+
+
+def prepare_backtest_data(rolling_window: int, slope_window: int, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data")):
     """
     Prepares cleaned and aligned data for backtest. Computes spread z-score and rolling hedge ratio (beta).
     """
@@ -98,9 +116,21 @@ def prepare_backtest_data(rolling_window: int, tickers_csv="final_pairs.csv", hi
             beta_series = compute_rolling_beta(df1_aligned['price'], df2_aligned['price'], rolling_window)
             df1_aligned['hedge_ratio'] = beta_series
 
+            # Compute rolling beta volatility
+            beta_vol = beta_series.rolling(window=rolling_window).std()
+            df1_aligned['beta_vol'] = beta_vol
+
             # Compute spread using rolling beta
             spread = df1_aligned['price'] - beta_series * df2_aligned['price']
+            # Compute zscore
             df1_aligned['zscore'] = compute_zscore_series(spread, window=rolling_window)
+
+            # Compute rolling spread volatility
+            spread_vol = compute_rolling_spread_vol(df1_aligned['price'], df2_aligned['price'], beta_series, rolling_window)
+            df1_aligned['spread_vol'] = spread_vol
+
+            # Compute spread momentum metric
+            df1_aligned['spread_slope'] = compute_rolling_slope(spread, slope_window)
 
             pair_data_dict[(t1, t2)] = (df1_aligned, df2_aligned)
 

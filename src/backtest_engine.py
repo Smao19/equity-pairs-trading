@@ -47,8 +47,9 @@ def load_data(config):
     tickers_csv = config.get('pairs_csv', "final_pairs.csv")
     historical_parquet = config.get('data_parquet', "test.parquet")
     data_dir = config.get('data_dir', os.path.abspath(os.path.join('.', 'data')))
-    rolling_window = config.get('beta_rwindow', 60)
-    return prepare_backtest_data(rolling_window, tickers_csv, historical_parquet, data_dir)  # {('ticker1', 'ticker2'): (df1, df2)}
+    rolling_window = config.get('rwindow', 60)
+    spread_momentum_window = config.get('spread_momentum_window', 5)
+    return prepare_backtest_data(rolling_window, spread_momentum_window, tickers_csv, historical_parquet, data_dir)  # {('ticker1', 'ticker2'): (df1, df2)}
 
 
 class BacktestEngine:
@@ -57,8 +58,10 @@ class BacktestEngine:
         self.pair_data_dict = load_data(self.config)
         self.strategy = Strategy(config)
         self.execution = ExecutionModel(config)
+        self.execution.pair_data = self.pair_data_dict
         self.portfolio = Portfolio(config)
         self.risk = RiskModel(config)
+        self.risk.pair_data = self.pair_data_dict
         self.reports = ReportGenerator()
 
         # Precompute common timestamps
@@ -94,8 +97,8 @@ class BacktestEngine:
             logger.debug(f"[{timestamp}] Prices: {current_prices}")
             signals = self.strategy.generate_signals(current_prices, self.portfolio.leg_positions)
             logger.debug(f"[{timestamp}] Signals: {signals}")
-            signals = self.risk.apply_constraints(signals, self.portfolio)
-            trades = self.execution.generate_trades(signals, self.portfolio.leg_positions, self.portfolio, current_prices)
+            signals = self.risk.apply_constraints(signals, self.portfolio, timestamp)
+            trades = self.execution.generate_trades(signals, self.portfolio.leg_positions, self.portfolio, current_prices, timestamp)
             self.portfolio.update(trades, current_prices, timestamp)
 
         # Liquidate all positions for accurate final metrics
