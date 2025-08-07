@@ -1,7 +1,7 @@
 """
 data_handler.py
 
-Responsible for loading, cleaning, and aligning raw OHLCV data for the asset universe.
+Responsible for fetching, cleaning, and aligning raw OHLCV data for the asset universe.
 - Handles missing values and timestamp alignment.
 - Outputs cleaned DataFrames for downstream modules.
 - Offers data handling methods for facilitating backtest simulation
@@ -10,10 +10,11 @@ Responsible for loading, cleaning, and aligning raw OHLCV data for the asset uni
 import os
 from datetime import datetime, timedelta
 import pandas as pd
-from polygon import RESTClient
 from tqdm import tqdm
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+import aiohttp
+import asyncio
 
 
 # Create a logger for the data handler module
@@ -85,7 +86,7 @@ def compute_rolling_slope(series, window):
     return (series - series.shift(window)) / window
 
 
-def prepare_backtest_data(rolling_window: int, slope_window: int, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data")):
+def prepare_backtest_data(rolling_window=60, slope_window=5, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data"), static_beta=False):
     """
     Prepares cleaned and aligned data for backtest. Computes spread z-score and rolling hedge ratio (beta).
     """
@@ -109,24 +110,41 @@ def prepare_backtest_data(rolling_window: int, slope_window: int, tickers_csv="f
             df1_aligned, df2_aligned = df1.align(df2, join='inner', axis=0)
 
             # Add price column
-            df1_aligned['price'] = df1_aligned['close']
-            df2_aligned['price'] = df2_aligned['close']
+            df1_aligned['price'] = np.log(df1_aligned['close'])
+            df2_aligned['price'] = np.log(df2_aligned['close'])
 
-            # Compute rolling hedge ratio (beta) of df1 on df2
-            beta_series = compute_rolling_beta(df1_aligned['price'], df2_aligned['price'], rolling_window)
-            df1_aligned['hedge_ratio'] = beta_series
+            if static_beta:
+                # Compute static hedge ratio (beta) of df1 on df2 using OLS
+                X = df2_aligned['price'].values.reshape(-1, 1)
+                y = df1_aligned['price'].values
+                beta = np.linalg.lstsq(X, y, rcond=None)[0][0]
+                df1_aligned['hedge_ratio'] = beta
+            else:
+                # Compute rolling hedge ratio (beta) of df1 on df2
+                beta_series = compute_rolling_beta(df1_aligned['price'], df2_aligned['price'], rolling_window)
+                df1_aligned['hedge_ratio'] = beta_series
 
             # Compute rolling beta volatility
-            beta_vol = beta_series.rolling(window=rolling_window).std()
-            df1_aligned['beta_vol'] = beta_vol
+            if not static_beta:
+                beta_vol = beta_series.rolling(window=rolling_window).std()
+                df1_aligned['beta_vol'] = beta_vol
 
-            # Compute spread using rolling beta
-            spread = df1_aligned['price'] - beta_series * df2_aligned['price']
+            # Compute spread using appropriate beta
+            if static_beta:
+                spread = df1_aligned['price'] - beta * df2_aligned['price']
+                df1_aligned['spread'] = spread
+            else: 
+                spread = df1_aligned['price'] - beta_series * df2_aligned['price']
+                df1_aligned['spread'] = spread
+           
             # Compute zscore
             df1_aligned['zscore'] = compute_zscore_series(spread, window=rolling_window)
 
             # Compute rolling spread volatility
-            spread_vol = compute_rolling_spread_vol(df1_aligned['price'], df2_aligned['price'], beta_series, rolling_window)
+            if static_beta:
+                spread_vol = compute_rolling_spread_vol(df1_aligned['price'], df2_aligned['price'], beta, rolling_window)
+            else:
+                spread_vol = compute_rolling_spread_vol(df1_aligned['price'], df2_aligned['price'], beta_series, rolling_window)
             df1_aligned['spread_vol'] = spread_vol
 
             # Compute spread momentum metric
@@ -186,106 +204,180 @@ def clean_data(df):
 
 def align_data(df, method='inner'):
     """
-    Aligns a multi-indexed DataFrame of OHLCV data across tickers using the specified method.
+    Aligns OHLCV data across tickers using the specified method.
 
     Parameters:
-    - df: A DataFrame with MultiIndex columns (ticker, attribute).
-    - method: Join method — 'inner' (default) or 'outer'.
+    - df: A DataFrame with multiIndex columns: (ticker, attribute)
+    - method: Join method — 'inner' (default), 'outer', 'ffill', etc.
 
     Returns:
-    - Aligned DataFrame with a common datetime index.
+    - Aligned DataFrame with a common datetime index (same column format as input).
     """
 
-    if not isinstance(df.columns, pd.MultiIndex):
-        raise ValueError("Expected MultiIndex columns with (ticker, attribute) format.")
+    # Multi-ticker DataFrame with MultiIndex columns
+    if isinstance(df.columns, pd.MultiIndex):
+        tickers = df.columns.get_level_values(0).unique()
+        aligned_dfs = []
 
-    # Split and realign each ticker-specific subframe
-    tickers = df.columns.get_level_values(0).unique()
-    aligned_dfs = []
+        for ticker in tickers:
+            sub_df = df[ticker].copy()
+            sub_df.columns = pd.MultiIndex.from_product([[ticker], sub_df.columns])
+            aligned_dfs.append(sub_df)
 
-    for ticker in tickers:
-        sub_df = df[ticker].copy()
-        sub_df.columns = pd.MultiIndex.from_product([[ticker], sub_df.columns])
-        aligned_dfs.append(sub_df)
-
-    return pd.concat(aligned_dfs, axis=1, join=method)
+        return pd.concat(aligned_dfs, axis=1, join=method)
+    else:
+        raise ValueError("Expected DataFrame with MultiIndex columns.")
 
 
 class DataHandler:
-    def __init__(self, tickers, api_key=None):
+    def __init__(self, tickers, api_key, chunk_size="monthly", max_concurrent_requests=15):
         self.tickers = tickers
         self.api_key = api_key
-        self.client = RESTClient(self.api_key)
+        self.chunk_size = chunk_size  # 'monthly' or number of days as int
+        self.max_concurrent_requests = max_concurrent_requests
 
-    def fetch_single_df(self, ticker, start_date="2022-01-01", end_date="2023-12-31"):
-        """Fetch and clean minute-bar OHLCV data from Polygon for a single ticker and return as a DataFrame."""
-        all_data = []
+
+    def _generate_chunks(self, start_date, end_date):
         start = datetime.fromisoformat(start_date)
         end = datetime.fromisoformat(end_date)
-        step = timedelta(days=5)
 
-        total_days = (end - start).days + 1
-        windows = [
-            (start + i * step, min(start + (i + 1) * step, end))
-            for i in range((total_days + step.days - 1) // step.days)
+        if self.chunk_size == "monthly":
+            chunks = []
+            current = start
+            while current < end:
+                next_month = (current.replace(day=1) + timedelta(days=32)).replace(day=1)
+                chunks.append((current, min(next_month, end)))
+                current = next_month
+            return chunks
+        elif isinstance(self.chunk_size, int):
+            step = timedelta(days=self.chunk_size)
+            return [(start + i * step, min(start + (i + 1) * step, end))
+                    for i in range((end - start).days // self.chunk_size + 1)]
+        else:
+            raise ValueError("chunk_size must be 'monthly' or an integer.")
+
+
+    async def _fetch_range(self, session, ticker, start, end, semaphore):
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/minute/{start.date()}/{end.date()}"
+        params = {
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": 50000,
+            "apiKey": self.api_key
+        }
+
+        async with semaphore:
+            for attempt in range(2):  # Try once, then retry once
+                try:
+                    async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        if resp.status != 200:
+                            raise RuntimeError(f"HTTP {resp.status}")
+
+                        data = await resp.json()
+                        results = data.get("results", None)
+                        
+                        if not isinstance(results, list) or not results:
+                            return ticker, None, None
+
+                        df = pd.DataFrame([{
+                            "datetime": datetime.fromtimestamp(b["t"] / 1000.0),
+                            "open": b["o"],
+                            "high": b["h"],
+                            "low": b["l"],
+                            "close": b["c"],
+                            "volume": b["v"]
+                        } for b in results])
+
+                        return ticker, df, None
+
+                except Exception as e:
+                    logger.warning(f"[RETRY] {ticker} | Chunk {start.date()} to {end.date()} | Error: {e}")
+
+                    if attempt < 1:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    else:
+                        return ticker, None, "final failure"
+
+        return ticker, None, "unexpected"
+
+
+    async def _fetch_all_chunks_for_ticker(self, ticker, start_date, end_date, session, semaphore):
+        # Generate date chunks (e.g., monthly) for this ticker
+        chunks = self._generate_chunks(start_date, end_date)
+        
+        # Launch fetch tasks for each chunk
+        tasks = [
+            self._fetch_range(session, ticker, start, end, semaphore)
+            for start, end in chunks
         ]
 
-        logger.info(f"Fetching {ticker} from {start_date} to {end_date}...")
+        # Await all chunk fetches for this ticker
+        results = await asyncio.gather(*tasks)
 
-        for window_start, window_end in windows:
-            try:
-                resp = self.client.get_aggs(
-                    ticker=ticker,
-                    multiplier=1,
-                    timespan="minute",
-                    from_=window_start.strftime("%Y-%m-%d"),
-                    to=window_end.strftime("%Y-%m-%d"),
-                    limit=50000
-                )
-                for bar in resp:
-                    all_data.append({
-                        "datetime": datetime.fromtimestamp(bar.timestamp / 1000.0),
-                        "open": bar.open,
-                        "high": bar.high,
-                        "low": bar.low,
-                        "close": bar.close,
-                        "volume": bar.volume
-                    })
-            except Exception as e:
-                logger.error(f"[ERROR] {ticker} {window_start.date()} - {window_end.date()} failed: {e}")
-                return None
+        dfs = []
+        for r in results:
+            if isinstance(r, tuple) and len(r) == 3:
+                _, df, _ = r
+                if df is not None:
+                    dfs.append(df)
 
-        df = pd.DataFrame(all_data)
-        if df.empty:
-            logger.warning(f"[WARN] No data for {ticker}")
-            return None
+        # If no chunks succeeded, log warning and return None
+        if not dfs:
+            logger.warning(f"[FAIL] {ticker} - all chunks failed or returned no data")
+            return ticker, None
 
-        df = clean_data(df)
-        return df
+        # Combine all valid chunks for this ticker
+        full_df = pd.concat(dfs)
 
-    def fetch_all_to_df(self, start_date="2022-01-01", end_date="2023-12-31", show_progress=True, max_workers=12):
-        """
-        Fetch all tickers (multi-threaded) into a single multi-indexed DataFrame
-        `max_workers` controls the number of parallel threads
-        """
+        # Perform cleaning and alignment per ticker BEFORE combining all dataframes
+        full_df.set_index("datetime", inplace=True)
+        full_df = clean_data(full_df)
 
+        # Add ticker level columns to produce MultiIndex
+        full_df.columns = pd.MultiIndex.from_product([[ticker], full_df.columns])
+
+        logger.info(f"[DONE] {ticker}")
+        return ticker, full_df
+
+
+    async def _fetch_all_tickers(self, start_date, end_date):
+        # Limit concurrency with a semaphore
+        semaphore = asyncio.Semaphore(self.max_concurrent_requests)
         data = {}
 
-        def task(ticker):
-            return ticker, self.fetch_single_df(ticker, start_date, end_date)
+        async with aiohttp.ClientSession() as session:
+            # Launch one coroutine per ticker
+            tasks = [
+                self._fetch_all_chunks_for_ticker(t, start_date, end_date, session, semaphore)
+                for t in self.tickers
+            ]
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(task, t): t for t in self.tickers}
-            for f in tqdm(as_completed(futures), total=len(futures), desc="Fetching all tickers", disable=not show_progress):
-                ticker, df = f.result()
+            # Display progress with tqdm
+            for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fetching all tickers"):
+                ticker, df = await coro
                 if df is not None:
                     data[ticker] = df
-                else:
-                    logger.warning(f"[WARN] No data fetched for {ticker}")
 
-        if not data:
-            raise RuntimeError("No data fetched for any tickers.")
+        logger.info(f"[SUMMARY] Fetched data for {len(data)}/{len(self.tickers)} tickers")
+        return data
 
-        # Combine into a single multi-indexed DataFrame
-        combined_df = pd.concat(data.values(), axis=1, keys=data.keys())
+
+    def fetch_all_to_df(self, start_date: str, end_date: str,
+                        align: bool = True, align_method: str = 'inner') -> pd.DataFrame:
+        """
+        Main method to fetch historical data for all tickers and return a combined DataFrame.
+        Data is fetched, cleaned, aligned (if enabled), and combined.
+        """
+        loop = asyncio.get_event_loop()
+        data = loop.run_until_complete(
+            self._fetch_all_tickers(start_date, end_date)
+        )
+
+        # Remove tickers that returned None
+        data = {ticker: df for ticker, df in data.items() if df is not None}
+
+        # Combine using keys for proper MultiIndex
+        combined_df = pd.concat(data.values(), axis=1, sort=True)
+
         return combined_df
