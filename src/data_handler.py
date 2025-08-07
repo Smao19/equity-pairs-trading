@@ -15,6 +15,7 @@ import logging
 import numpy as np
 import aiohttp
 import asyncio
+import sys
 
 
 # Create a logger for the data handler module
@@ -88,8 +89,16 @@ def compute_rolling_slope(series, window):
 
 def prepare_backtest_data(rolling_window=60, slope_window=5, tickers_csv="final_pairs.csv", historical_parquet="test.parquet", data_dir=os.path.abspath("data"), static_beta=False):
     """
-    Prepares cleaned and aligned data for backtest. Computes spread z-score and rolling hedge ratio (beta).
+    Prepares cleaned and aligned data for backtest. 
+    Computes:
+    - spread 
+    - z-score 
+    - hedge ratio (beta)
+    - beta volatility
+    - spread volatility
+    - spread slope
     """
+    
     pair_list = get_pairs_list(tickers_csv=tickers_csv, data_dir=data_dir)
     historical_df = pd.read_parquet(os.path.join(data_dir, historical_parquet))
 
@@ -354,7 +363,7 @@ class DataHandler:
             ]
 
             # Display progress with tqdm
-            for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fetching all tickers"):
+            for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Fetching all tickers", file=sys.stdout):
                 ticker, df = await coro
                 if df is not None:
                     data[ticker] = df
