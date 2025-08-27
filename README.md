@@ -1,6 +1,6 @@
 # equity-pairs-trading
 
-Quantitave Project - Developing & Simulating Equities Pairs Trading Strategies
+Quantitave Project - Researching, Developing, and Simulating Equities Pairs Trading Strategies
 
 Currently finished components:
 - Complete backtesting system in <code>src/</code>
