@@ -2,7 +2,7 @@
 
 Quantitave Project - Researching, Developing, and Simulating Equities Pairs Trading Strategies
 
-Currently finished components:
+Currently functional components:
 - Complete backtesting system in <code>src/</code>
 - Robust data acquisition and handling module: <code>src/data_handler.py</code>
 - Pair research pipeline: <code>notebooks/pair_research.ipynb</code>
