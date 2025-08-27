@@ -1,2 +1,4 @@
-# Stat_Arb_Strat
-Quantitave Project - Developing & Simulating an Intraday Equities Stat Arb Strategy
+# equity-pairs-trading
+Quantitave Project - Developing & Simulating Equities Stat Arb Strategies
+
+Work in progress...
