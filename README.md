@@ -11,8 +11,8 @@ Working on:
 - Signal generation models (each model will be developed and tested in <code>notebooks/</code>)
 
 Planned signal generation models:  
-o	Model 1: Static Ornstein-Uhlenbeck (OU) with Monte Carlo-optimized thresholds  
-o	Model 2: Dynamic OU estimation with stochastic volatility; dynamic thresholds via stopping theory  
-o	Model 3: Dynamic OU plus ML volatility-regime classification for adaptive thresholding  
+- Model 1: Static Ornstein-Uhlenbeck (OU) with Monte Carlo-optimized thresholds  
+-	Model 2: Dynamic OU estimation with stochastic volatility; dynamic thresholds via stopping theory  
+- Model 3: Dynamic OU plus ML volatility-regime classification for adaptive thresholding  
 
 Project write up and repo break down (including reproducability guide) coming soon...
